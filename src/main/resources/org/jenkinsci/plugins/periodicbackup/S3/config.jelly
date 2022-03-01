@@ -31,6 +31,9 @@
     <f:entry title="${%backupS3Bucket.title}" field="bucket">
         <f:textbox/>
     </f:entry>
+    <f:entry title="${%backupS3BucketPrefix.title}" field="prefix">
+        <f:textbox/>
+    </f:entry>
     <f:entry title="${%region.title}" field="region">
         <f:select/>
     </f:entry>

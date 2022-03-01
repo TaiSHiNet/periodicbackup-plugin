@@ -27,6 +27,8 @@ package org.jenkinsci.plugins.periodicbackup;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -67,6 +69,7 @@ import jenkins.model.Jenkins;
 public class S3 extends Location {
 
     private String bucket;
+    private String prefix;
     private String tmpDir;
     private String region;
     private String credentialsId;
@@ -74,9 +77,10 @@ public class S3 extends Location {
     private static final Logger LOGGER = Logger.getLogger(S3.class.getName());
 
     @DataBoundConstructor
-    public S3(String bucket, boolean enabled, String tmpDir, String region, String credentialsId) {
+    public S3(String bucket, String prefix, boolean enabled, String tmpDir, String region, String credentialsId) {
         super(enabled);
         this.bucket = bucket;
+        this.prefix = prefix;
         this.setTmpDir(tmpDir);
         this.setRegion(region);
         this.setCredentialsId(credentialsId);
@@ -87,21 +91,27 @@ public class S3 extends Location {
     public Iterable<BackupObject> getAvailableBackups() {
         AmazonS3 client = AmazonUtil.getAmazonS3Client(region, credentialsId);
 
-        List<S3ObjectSummary> objectSummarys = client.listObjects(bucket).getObjectSummaries();
+        List<S3ObjectSummary> objectSummarys = client.listObjects(bucket, prefix).getObjectSummaries();
         List<String> backupObjectFileNames = new ArrayList<String>();
         List<File> backupObjectFiles = new ArrayList<File>();
         for (S3ObjectSummary objectSummary : objectSummarys) {
             if (StringUtils.endsWith(objectSummary.getKey(), BackupObject.EXTENSION)) {
                 backupObjectFileNames.add(objectSummary.getKey());
-                try {
-                    File dir = new File(tmpDir);
-                    if (!dir.isDirectory()) {
-                        if (!dir.mkdir()) {
-                            LOGGER.warning("Unable to make temp directory: " + tmpDir);
-                            return null;
-                        }
+                File dir = new File(tmpDir);
+                if (!dir.isDirectory()) {
+                    if (!dir.mkdir()) {
+                        LOGGER.warning("Unable to make temp directory: " + tmpDir);
+                        return null;
                     }
-                    File file = new File(dir + objectSummary.getKey());
+                }
+                Path backupFile = Paths.get(objectSummary.getKey()).getFileName();
+                if (backupFile == null) {
+                    LOGGER.warning("Unable to get file name from: " + objectSummary.getKey());
+                    return null;
+                }
+                backupFile = Paths.get(tmpDir, backupFile.toString());
+                File file = backupFile.toFile();
+                try {
                     IOUtils.copy(client.getObject(bucket, objectSummary.getKey()).getObjectContent(),
                             new FileOutputStream(file));
                     backupObjectFiles.add(file);
@@ -123,7 +133,8 @@ public class S3 extends Location {
             AmazonS3 client = AmazonUtil.getAmazonS3Client(region, credentialsId);
             for (File archive : archives) {
                 LOGGER.info(archive.getName() + " copying to s3 bucket " + bucket);
-                client.putObject(bucket, archive.getName(), archive);
+                Path backupPath = Paths.get(prefix, archive.getName());
+                client.putObject(bucket, backupPath.toString(), archive);
                 LOGGER.info(archive.getName() + " copied to s3 bucket " + bucket);
             }
             File dir = new File(tmpDir);
@@ -135,20 +146,22 @@ public class S3 extends Location {
             }
             File backupObjectFileDestination = new File(dir, backupObjectFile.getName());
             Files.copy(backupObjectFile, backupObjectFileDestination);
-            client.putObject(bucket, backupObjectFile.getName(), backupObjectFileDestination);
+            Path backupPath = Paths.get(prefix, backupObjectFile.getName());
+            client.putObject(bucket, backupPath.toString(), backupObjectFileDestination);
             LOGGER.info(backupObjectFile.getName() + " copied to " + backupObjectFileDestination.getAbsolutePath());
         } else {
             LOGGER.warning("skipping location " + this.bucket + " since it is disabled or it does not exist.");
         }
     }
 
+    @SuppressWarnings("deprecation")
     @Override
     public Iterable<File> retrieveBackupFromLocation(final BackupObject backup, File tempDir)
             throws IOException, PeriodicBackupException {
         AmazonS3 client = AmazonUtil.getAmazonS3Client(region, credentialsId);
 
         List<String> backpFileNames = new ArrayList<String>();
-        List<S3ObjectSummary> objectSummarys = client.listObjects(bucket).getObjectSummaries();
+        List<S3ObjectSummary> objectSummarys = client.listObjects(bucket, prefix).getObjectSummaries();
         for (S3ObjectSummary objectSummary : objectSummarys) {
             if (objectSummary.getKey()
                     .contains(Util.getFormattedDate(BackupObject.FILE_TIMESTAMP_PATTERN, backup.getTimestamp()))
@@ -161,7 +174,13 @@ public class S3 extends Location {
 
         // Copy every archive to the temp dir
         for (String backupFilename : backpFileNames) {
-            File copiedFile = new File(tempDir, backupFilename);
+            Path p = Paths.get(backupFilename).getFileName();
+            if (p == null) {
+                LOGGER.warning("Unable to get file name from: " + backupFilename);
+                return null;
+            }
+            p = Paths.get(tmpDir, p.toString());
+            File copiedFile = p.toFile();
             try {
                 IOUtils.copy(client.getObject(bucket, backupFilename).getObjectContent(),
                         new FileOutputStream(copiedFile));
@@ -180,7 +199,7 @@ public class S3 extends Location {
         String filenamePart = Util.generateFileNameBase(backupObject.getTimestamp());
         AmazonS3 client = AmazonUtil.getAmazonS3Client(region, credentialsId);
 
-        List<S3ObjectSummary> objectSummarys = client.listObjects(bucket).getObjectSummaries();
+        List<S3ObjectSummary> objectSummarys = client.listObjects(bucket, prefix).getObjectSummaries();
         for (S3ObjectSummary objectSummary : objectSummarys) {
             if (StringUtils.contains(objectSummary.getKey(), filenamePart)) {
                 LOGGER.info("Deleting backupObject..." + objectSummary.getKey());
@@ -220,6 +239,14 @@ public class S3 extends Location {
         return client.doesBucketExistV2(bucket);
     }
 
+    public String getPrefix() {
+        return prefix;
+    }
+
+    public void setPrefix(String prefix) {
+        this.prefix = prefix;
+    }
+
     public String getRegion() {
         return region;
     }
@@ -250,7 +277,7 @@ public class S3 extends Location {
         return Objects.hashCode(bucket, enabled);
     }
 
-    @SuppressWarnings("unused")
+    @SuppressWarnings("deprecation")
     @Extension
     public static class DescriptorImpl extends LocationDescriptor {
         public String getDisplayName() {
